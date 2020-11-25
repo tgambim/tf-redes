@@ -8,11 +8,14 @@ const char* IP_PROTOCOLS[140] = {
 
 enum ARP_OPERATION {ARP_REQUEST=1, ARP_REPLY=2};
 
+typedef uint8_t ip[4];
+typedef uint8_t mac[6];
+
 struct flow_entry_s{
-    uint8_t src_ip[4];
-    uint8_t src_port;
-    uint8_t tgt_ip[4];
-    uint8_t tgt_port;
+    ip src_ip;
+    uint16_t src_port;
+    ip tgt_ip;
+    uint16_t tgt_port;
     uint8_t ip_encapsulated_protocol;
     char protocol_name[10];
     int bytes;
@@ -20,8 +23,8 @@ struct flow_entry_s{
 typedef struct flow_entry_s flow_entry;
 
 struct eth_hdr {
-	uint8_t dst_addr[6];
-	uint8_t src_addr[6];
+	mac dst_addr;
+	mac src_addr;
 	uint16_t eth_type;
 };
 
@@ -31,10 +34,15 @@ struct arp_packet {
 	uint8_t hlen;			/* hardware address length */
 	uint8_t plen;			/* protocol address length */
 	uint16_t operation;		/* ARP operation */
-	uint8_t src_hwaddr[6];		/* source hardware address */
-	uint8_t src_paddr[4];		/* source protocol address */
-	uint8_t tgt_hwaddr[6];		/* target hardware address */
-	uint8_t tgt_paddr[4];		/* target protocol address */
+	mac src_hwaddr;		/* source hardware address */
+	ip src_paddr;		/* source protocol address */
+	mac tgt_hwaddr;		/* target hardware address */
+	ip tgt_paddr;		/* target protocol address */
+};
+
+union protocol_u {
+    struct tcphdr tcp;
+    struct udphdr udp;
 };
 
 struct ip_hdr {
@@ -46,8 +54,8 @@ struct ip_hdr {
 	uint8_t ttl;			/* time to live */
 	uint8_t proto;			/* protocol */
 	uint16_t sum;			/* checksum */
-	uint8_t src[4];			/* source address */
-	uint8_t dst[4];			/* destination address */
+	ip src;			/* source address */
+	ip dst;			/* destination address */
 };
 
 union packet_u {

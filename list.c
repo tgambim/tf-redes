@@ -26,6 +26,7 @@ void pushElement(void* element, list * list){
 
 void* removeElement(compare_function compare, void* element, list * list){
     node * target_node;
+    void * foundElement;
     node * curNode = list->head;
 
     if(list->size!=0){
@@ -49,7 +50,9 @@ void* removeElement(compare_function compare, void* element, list * list){
             curNode->next_node = curNode->next_node->next_node;
         }
         list->size--;
-        return target_node->element;
+        foundElement = target_node->element;
+        free(target_node);
+        return foundElement;
     }
 }
 

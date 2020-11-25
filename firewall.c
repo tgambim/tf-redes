@@ -1,7 +1,6 @@
 #include <arpa/inet.h>
 #include <linux/if_packet.h>
 #include <linux/ip.h>
-#include <linux/udp.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -9,24 +8,28 @@
 #include <sys/socket.h>
 #include <net/if.h>
 #include <netinet/ether.h>
+#include <netinet/tcp.h>
+#include <netinet/udp.h>
 #include <unistd.h>
 #include <signal.h>
 #include "firewall.h"
 #include "list.c"
+#include <pthread.h>
 
-uint8_t this_mac[6];
-uint8_t bcast_mac[6] =	{0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
-uint8_t dst_mac[6] =	{0x00, 0x00, 0x00, 0x22, 0x22, 0x22};
-uint8_t src_mac[6] =	{0x00, 0x00, 0x00, 0x33, 0x33, 0x33};
-
-uint8_t router_ip[4] =	{10, 0, 0, 1};
-uint8_t target_pc_ip[4] =	{10, 0, 0, 21};
-uint8_t this_ip[4] =	{0, 0, 0, 0};
+mac this_mac;
+mac router_mac =	{0x10, 0x10, 0x10, 0x10, 0x10, 0x11};
 
 struct sockaddr_ll socket_address;
 int sockfd;
+pthread_t pidDisplayThread;
+int running=1; //todos os loops infinitos dependem dessa variável, se zerada sai do loop
 
 list flowEntries = {
+        .head = NULL,
+        .tail = NULL,
+        .size = 0
+};
+list blacklist = {
         .head = NULL,
         .tail = NULL,
         .size = 0
@@ -34,7 +37,7 @@ list flowEntries = {
 
 void createAndConfigureSocket(char ifName[]);
 
-void watchPackets();
+void* watchPackets(void * params);
 int isIpPacket(union eth_buffer packet);
 
 void dumpNetworkPackets();
@@ -42,30 +45,114 @@ void updateFlowList(union eth_buffer packet, int size);
 int findFlowEntry(void* listElement, void* searchElement);
 void printFlowEntry(flow_entry* flowEntry);
 
-void importBlackList();
 int isBlackListed(uint8_t *ip);
 
-void forwardPacket(union eth_buffer packet);
+void forwardPacket(union eth_buffer packet, int numBytes);
 
+void blacklistMode();
+
+void insertIpInBlacklist();
+void removeIpInBlackList();
+void printBlackList();
+int compareIp(void* listElement, void* searchElement);
+
+void killChildrenThreads(){
+    running=0;
+}
 
 int main(int argc, char *argv[])
 {
     char ifName[IFNAMSIZ];
     struct sigaction psa;
-    int pid;
+    char key;
     /* Get interface name */
     if (argc > 1)
         strcpy(ifName, argv[1]);
     else
         strcpy(ifName, DEFAULT_IF);
 
+    psa.sa_handler = killChildrenThreads;
+    sigaction(SIGINT, &psa, NULL);
+    sigaction(SIGABRT, &psa, NULL);
+
     //configura o socket
     createAndConfigureSocket(ifName);
 
-    importBlackList();
 
-    watchPackets();
+    pthread_create(&pidDisplayThread, NULL, watchPackets, NULL);
+
+    while (running) {
+        scanf("%c", &key);
+        if(key=='b')
+            blacklistMode();
+    }
+
 	return 0;
+}
+
+void blacklistMode(){
+    char key;
+    do{
+        printBlackList();
+        printf("\n0 - sair\n1 - inserir\n2 - remover\n3 - mostrar lista\n");
+        scanf("%c", &key); //flush stdin
+        scanf("%c", &key);
+        if(key == '1'){
+            insertIpInBlacklist();
+        }else if(key == '2'){
+            removeIpInBlackList();
+        }else if(key == '3'){
+            printBlackList();
+        }
+    }while (key!='0');
+}
+
+void printBlackList(){
+    int i=0;
+    node* curNode;
+    uint8_t *curIp;
+    curNode = blacklist.head;
+    while (curNode!=NULL){
+        curIp = (uint8_t*)curNode->element;
+        printf("\n\n%d - %d.%d.%d.%d\n", i++, curIp[0],  curIp[1],  curIp[2],  curIp[3]);
+        curNode = curNode->next_node;
+    }
+}
+
+void insertIpInBlacklist(){
+    int i = 0;
+    uint8_t *curIp;
+    char buffer[20];
+    char *ptr;
+    curIp = malloc(sizeof(ip));
+
+    printf("Digite o ip (formato: 127.0.0.1):");
+    scanf("%s", buffer);
+
+    ptr = strtok(buffer, ".");
+    while (ptr!=NULL && i<4){
+        curIp[i++] = atoi(ptr);
+
+        ptr = strtok(NULL, ".");
+    };
+
+    pushElement((void*)curIp, &blacklist);
+}
+
+void removeIpInBlackList(){
+    int code, i=0;
+    node* curNode = blacklist.head;
+
+    printf("Digite o código do ip: ");
+    scanf("%d", &code);
+
+    while (curNode!=NULL){
+        if(code == i++ ){
+            removeElement(compareIp, curNode->element, &blacklist);
+        }
+        curNode = curNode->next_node;
+    }
+    printf("Removido com sucesso\n");
 }
 
 void createAndConfigureSocket(char ifName[]){
@@ -99,25 +186,22 @@ void createAndConfigureSocket(char ifName[]){
     /* End of configuration. Now we can send and receive data using raw sockets. */
 }
 
-void importBlackList(){
-    /* TODO implement */
-}
-
-void watchPackets(){
+void *watchPackets(void * params){
     union eth_buffer buffer_u;
     int numbytes;
 
-    while (1){
+    while (1) {
         numbytes = recvfrom(sockfd, buffer_u.raw_data, ETH_LEN, 0, NULL, NULL);
 
-        if (isIpPacket(buffer_u)){
+        if (isIpPacket(buffer_u)) {
             updateFlowList(buffer_u, numbytes);
             dumpNetworkPackets();
 
-            if(!isBlackListed(buffer_u.cooked_data.payload.ip.src))
-                forwardPacket(buffer_u);
+            if (!isBlackListed(buffer_u.cooked_data.payload.ip.src)){
 
-            continue;
+                forwardPacket(buffer_u, numbytes);
+            }
+
         }
     }
 }
@@ -127,6 +211,7 @@ int isIpPacket(union eth_buffer packet){
 }
 
 void updateFlowList(union eth_buffer packet, int size){
+    union protocol_u *encapsulatedProtocol;
     flow_entry *listFoundEntry;
     flow_entry *flowEntry = malloc(sizeof(flow_entry));
 
@@ -138,9 +223,16 @@ void updateFlowList(union eth_buffer packet, int size){
 
     memcpy(flowEntry->protocol_name, IP_PROTOCOLS[packet.cooked_data.payload.ip.proto], strlen(IP_PROTOCOLS[packet.cooked_data.payload.ip.proto]));
 
-    /* TODO handle tcp and udp inner protocols */
-    flowEntry->src_port = 0;
-    flowEntry->tgt_port = 0;
+    if(packet.cooked_data.payload.ip.proto == 6 || packet.cooked_data.payload.ip.proto == 17){
+        encapsulatedProtocol = (union protocol_u *) (packet.raw_data + sizeof(struct eth_hdr) + sizeof(struct ip_hdr));
+    }
+    if(packet.cooked_data.payload.ip.proto == 6){
+        flowEntry->src_port = ntohs(encapsulatedProtocol->tcp.source);
+        flowEntry->tgt_port = ntohs(encapsulatedProtocol->tcp.dest);
+    }else if(packet.cooked_data.payload.ip.proto == 17){
+        flowEntry->src_port = ntohs(encapsulatedProtocol->udp.source);
+        flowEntry->tgt_port = ntohs(encapsulatedProtocol->udp.dest);
+    }
 
     listFoundEntry = (flow_entry*) findElement(findFlowEntry, flowEntry, &flowEntries);
     if(listFoundEntry != NULL){
@@ -156,8 +248,16 @@ int findFlowEntry(void* listElement, void* searchElement){
 
     return memcmp(flowListEntry->src_ip, flowSearchEntry->src_ip, sizeof(flowListEntry->src_ip)) ==0 &&
             memcmp(flowListEntry->tgt_ip, flowSearchEntry->tgt_ip, sizeof(flowListEntry->tgt_ip)) ==0 &&
+            flowListEntry->ip_encapsulated_protocol == flowSearchEntry->ip_encapsulated_protocol &&
             flowListEntry->src_port == flowSearchEntry->src_port &&
             flowListEntry->tgt_port == flowSearchEntry->tgt_port;
+}
+
+int compareIp(void* listElement, void* searchElement){
+    uint8_t *listIp = (uint8_t*) listElement; //cast params
+    uint8_t *searchIp=  (uint8_t*) searchElement;
+
+    return memcmp(listIp, searchIp, sizeof(ip)) ==0 ;
 }
 
 void dumpNetworkPackets(){
@@ -182,82 +282,18 @@ void printFlowEntry(flow_entry* flowEntry){
     );
 }
 
-int isBlackListed(uint8_t *ip){
-    /* TODO implement */
-    return 0;
+int isBlackListed(ip searchIp){
+    if(findElement(compareIp, searchIp, &blacklist) != NULL)
+        return 1;
+    else
+        return 0;
 }
 
-void forwardPacket(union eth_buffer packet){
-    /* TODO implement */
-}
+void forwardPacket(union eth_buffer packet, int numBytes){
+    memcpy(packet.cooked_data.ethernet.dst_addr, router_mac, 6);
+    memcpy(packet.cooked_data.ethernet.src_addr, this_mac, 6);
 
-
-void showArpPacket(union eth_buffer packet){
-    printf("ARP packet received:\n");
-    printf("----------------------------------------------------------------\n");
-    printf("Hardware type: %d\n", ntohs(packet.cooked_data.payload.arp.hw_type));
-    printf("Protocol type: %d\n", ntohs(packet.cooked_data.payload.arp.prot_type));
-    printf("Hardware address length: %d\n", (packet.cooked_data.payload.arp.hlen));
-    printf("Protocol address length: %d\n", (packet.cooked_data.payload.arp.plen));
-    printf("Arp operation: %d\n", ntohs(packet.cooked_data.payload.arp.operation));
-    printf("Source hardware address: %02x:%02x:%02x:%02x:%02x:%02x\n",
-           (packet.cooked_data.payload.arp.src_hwaddr[0]),
-           (packet.cooked_data.payload.arp.src_hwaddr[1]),
-           (packet.cooked_data.payload.arp.src_hwaddr[2]),
-           (packet.cooked_data.payload.arp.src_hwaddr[3]),
-           (packet.cooked_data.payload.arp.src_hwaddr[4]),
-           (packet.cooked_data.payload.arp.src_hwaddr[5]));
-    printf("Source protocol address: %d.%d.%d.%d\n",
-           (packet.cooked_data.payload.arp.src_paddr[0]),
-           (packet.cooked_data.payload.arp.src_paddr[1]),
-           (packet.cooked_data.payload.arp.src_paddr[2]),
-           (packet.cooked_data.payload.arp.src_paddr[3]));
-    printf("Target hardware address: %02x:%02x:%02x:%02x:%02x:%02x\n",
-           (packet.cooked_data.payload.arp.tgt_hwaddr[0]),
-           (packet.cooked_data.payload.arp.tgt_hwaddr[1]),
-           (packet.cooked_data.payload.arp.tgt_hwaddr[2]),
-           (packet.cooked_data.payload.arp.tgt_hwaddr[3]),
-           (packet.cooked_data.payload.arp.tgt_hwaddr[4]),
-           (packet.cooked_data.payload.arp.tgt_hwaddr[5]));
-    printf("Target protocol address: %d.%d.%d.%d\n",
-           (packet.cooked_data.payload.arp.tgt_paddr[0]),
-           (packet.cooked_data.payload.arp.tgt_paddr[1]),
-           (packet.cooked_data.payload.arp.tgt_paddr[2]),
-           (packet.cooked_data.payload.arp.tgt_paddr[3]));
-    printf("----------------------------------------------------------------\n\n\n");
-}
-
-void sendArpPacket(uint8_t sourceIp[], uint8_t targetIp[], enum ARP_OPERATION operation, uint8_t sourceMac[], uint8_t targetMac[]){
-    union eth_buffer buffer_u;
-    /* To send data (in this case we will cook an ARP packet and broadcast it =])... */
-
-    /* fill the Ethernet frame header */
-    memcpy(buffer_u.cooked_data.ethernet.dst_addr, targetMac, 6);
-    memcpy(buffer_u.cooked_data.ethernet.src_addr, sourceMac, 6);
-    buffer_u.cooked_data.ethernet.eth_type = htons(ETH_P_ARP);
-
-    /* fill payload data (incomplete ARP request example) */
-    buffer_u.cooked_data.payload.arp.hw_type = htons(1);
-    buffer_u.cooked_data.payload.arp.prot_type = htons(ETH_P_IP);
-    buffer_u.cooked_data.payload.arp.hlen = 6;
-    buffer_u.cooked_data.payload.arp.plen = 4;
-    buffer_u.cooked_data.payload.arp.operation = htons(operation);
-    memcpy(buffer_u.cooked_data.payload.arp.src_hwaddr, this_mac, 6);
-    //memset(buffer_u.cooked_data.payload.arp.src_paddr, 0, 6);
-    memcpy(buffer_u.cooked_data.payload.arp.src_paddr, sourceIp, 4);
-    memset(buffer_u.cooked_data.payload.arp.tgt_hwaddr, 0, 6);
-    //memset(buffer_u.cooked_data.payload.arp.tgt_paddr, 0, 6);
-    memcpy(buffer_u.cooked_data.payload.arp.tgt_paddr, targetIp, 4);
-
-    /* Send it.. */
-    memcpy(socket_address.sll_addr, targetMac, 6);
-    if (sendto(sockfd, buffer_u.raw_data, sizeof(struct eth_hdr) + sizeof(struct arp_packet), 0,
+    if (sendto(sockfd, packet.raw_data, numBytes, 0,
                (struct sockaddr*)&socket_address, sizeof(struct sockaddr_ll)) < 0)
         printf("Send failed\n");
-}
-
-union eth_buffer getPacket(){
-    union eth_buffer receivedPacket;
-    recvfrom(sockfd, receivedPacket.raw_data, ETH_LEN, 0, NULL, NULL);
-    return receivedPacket;
 }
