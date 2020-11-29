@@ -264,7 +264,8 @@ void dumpNetworkPackets(){
     node* entryNode = flowEntries.head;
     flow_entry* flowEntry;
 
-    printf("------------------------ Tabela de Fluxo ------------------------\n");
+    printf("\n\n\n\n---- Tabela de Fluxo (aperte 'b' para bloquear um endereço) ----\n");
+    printf("----------------------------------------------------------------\n");
     while (entryNode!=NULL){
         flowEntry = (flow_entry*)entryNode->element;
         printFlowEntry(flowEntry);
